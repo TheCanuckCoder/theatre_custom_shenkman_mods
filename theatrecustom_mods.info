@@ -1,0 +1,5 @@
+name = theatrecustom Modifications
+description = Custom module to apply theatrecustom modifications to the site
+core = 7.x
+package = Custom
+files[] = theatrecustom_mods.module

@@ -1,0 +1,331 @@
+<?php
+
+define('ROLE_RENTAL_CLIENTS_RID', 7);
+define('EVENT_TYPE_PERFORMANCE_TID', 14);
+
+/**
+ * @file
+ * Module functionality
+ */
+
+/**
+ * Custom Rules Actions.
+ */
+function theatrecustom_mods_rules_action_info() {
+
+  $actions = array();
+
+  // Action to create user upon inquiry approval
+  $actions['theatrecustom_mods_rules_action_create_user'] = array(
+    'label' => t('Create user from Rental Inquiry'),
+    'parameter' => array(
+      'account' => array(
+        'type' => 'node',
+        'label' => t('Content'),
+      ),
+    ),
+    'group' => t('theatrecustom Custom'),
+    'base' => 'theatrecustom_mods_rules_action_create_user',
+  );
+
+  $actions['theatrecustom_mods_rules_action_copy_node'] = array(
+    'label' => t('Create Event node from Rental Application/Inquiry'),
+    'group' => t('theatrecustom Custom'),
+    'parameter' => array(
+      'rental' => array(
+        'type' => 'node',
+        'label' => t('Content'),
+      ),
+    ),
+  );
+
+  $actions['theatrecustom_mods_rules_action_set_state_inquiry'] = array(
+    'label' => t('Set default moderation state for Rental Inquiry'),
+    'group' => t('theatrecustom Custom'),
+    'parameter' => array(
+      'node' => array(
+        'type' => 'node',
+        'label' => t('Content'),
+      ),
+    ),
+  );
+
+  $actions['theatrecustom_mods_rules_action_set_state_rental'] = array(
+    'label' => t('Set default moderation state for Rental Applications'),
+    'group' => t('theatrecustom Custom'),
+    'parameter' => array(
+      'node' => array(
+        'type' => 'node',
+        'label' => t('Content'),
+      ),
+    ),
+  );
+  return $actions;
+}
+
+
+/**
+ *
+ */
+function theatrecustom_mods_rules_action_set_state_inquiry($node) {
+  workbench_moderation_moderate($node, 'submitted');
+}
+
+
+/**
+ *
+ */
+function theatrecustom_mods_rules_action_set_state_rental($node) {
+  workbench_moderation_moderate($node, 'submitted');
+}
+
+
+/**
+ * Action: Set a user account.
+ * @param node Rental Inquiry node
+ */
+function theatrecustom_mods_rules_action_create_user($node) {
+
+  // name
+  $name = $node->field_first_name['und'][0]['value'];
+  $name .= ' ' . $node->field_last_name['und'][0]['value'];
+
+  // password
+  $password = user_password(8);
+
+  // email
+  $mail = $node->field_email_address['und'][0]['email'];
+
+  // Set up the user fields
+  $new_user = array(
+    'name'   => $name,
+    'mail'   => $mail,
+    'pass'   => $password,
+    'status' => 1,
+    'init'   => 'email address',
+    'roles'  => array(ROLE_RENTAL_CLIENTS_RID=>ROLE_RENTAL_CLIENTS_RID), // Rental Clients
+  );
+
+  if(!user_load_by_mail($mail)) {
+    // The first parameter is left blank so a new user is created
+    $account = user_save(NULL, $new_user);
+
+    // Manually set the password so it appears in the e-mail.
+    $account->password = $new_user['pass'];
+
+    // carry over fields from the Rental Inquiry to the new account
+    $account->field_email_address = $node->field_email_address;
+    $account->field_first_name = $node->field_first_name;
+    $account->field_last_name = $node->field_last_name;
+    $account->field_phone_number = $node->field_phone_number;
+
+    user_save($account);
+
+    // Assign Rental Inquiry to newly created user.
+    $node->uid = $account->uid;
+    node_save($node);
+
+    // Send the e-mail through the user module.
+    drupal_mail(
+      'user', // Module
+      'register_no_approval_required', // Key
+      $new_user['mail'], // To
+      NULL, // Language
+      array('account' => $account), // Parameters
+      variable_get('site_mail','shenkmanarts@ottawa.ca') // From
+    );
+  }
+}
+
+
+/**
+ * Action: Create Event node from Rental Application/Inquiry
+ */
+function theatrecustom_mods_rules_action_copy_node($rental) {
+
+  global $user;
+
+  if($rental->type == 'rental') {
+    // Node defaults and settings
+    $node           = new stdClass();
+    $node->title    = $rental->title;
+    $node->type     = 'event';
+
+    // Sets some defaults. Invokes hook_prepare() and hook_node_prepare().
+    node_object_prepare($node); 
+
+    $node->language = 'en'; // Or e.g. 'en' if locale is enabled
+    $node->uid      = $rental->uid;
+    $node->status   = 0; //(1 or 0): published or not
+    $node->promote  = 0; //(1 or 0): promoted to front page
+    $node->comment  = 0; // 0 = comments disabled, 1 = read only, 2 = read/write
+
+    // Dates
+    $dates = $rental->field_rent_app_dates['und'];
+    if(isset($dates)) {
+      foreach($dates as $key => $date) {
+        $node->field_dates['und'][$key]['value'] = $dates[$key]['value'];
+        $node->field_dates['und'][$key]['revision_id'] = $dates[$key]['revision_id'];
+      }
+    }
+
+    // Event Type
+    // TODO
+    $node->field_event_type['und'] = EVENT_TYPE_PERFORMANCE_TID;
+    /*
+    if (!empty($rental->field_event_type['und'])) {
+      $node->field_event_type['und'] = $rental->field_event_type['und'];
+    }
+    */
+
+    // Event Venue
+    if (!empty($rental->field_name_of_room_s_requesting_['und'])) {
+      $node->field_event_venue['und'] = $rental->field_name_of_room_s_requesting_['und'];
+    }
+
+    // Submit & Save Node
+    $node = node_submit($node); // Prepare node for saving
+
+    // Create node in the DB
+    node_save($node);
+
+    // Set default moderation status to "Confirmed but not approved" for final
+    // edits from rental staff
+    workbench_moderation_moderate($node, 'draft');
+
+  } elseif($rental->type == 'rental_inquiry') {
+    $newnode = new stdClass();
+    if (isset($rental->field_event_title['und'][0]['value'])) {
+      $newnode->title = $rental->field_event_title['und'][0]['value'];
+    } else {
+      $newnode->title = $rental->title;
+    }
+    $newnode->type = 'rental';
+    node_object_prepare($newnode);
+    $newnode->language = 'en';
+    $renter = user_load_by_mail($rental->field_email_address['und'][0]['email']);
+    // Renter doesn't exist so create them
+    if(!$renter) {
+      theatrecustom_mods_rules_action_create_user($rental);
+      $renter = user_load_by_mail($rental->field_email_address['und'][0]['email']);
+    }
+    $rid = $renter->uid;
+    $newnode->nid = $rental->nid;
+    $newnode->uid = $rid;
+    $newnode->status  = 0;
+    $newnode->promote = 0;
+    $newnode->comment = 0;
+    // Dates
+    $dates = $rental->field_rent_inq_dates['und'];
+    if(isset($dates)) {
+      foreach($dates as $key => $date) {
+        $newnode->field_dates['und'][$key]['value'] = $dates[$key]['value'];
+        $newnode->field_dates['und'][$key]['revision_id'] = $dates[$key]['revision_id'];
+      }
+    }
+    // Applicant Name
+    $last_name = '';
+    if(isset($rental->field_last_name['und'])) {
+      $last_name = $rental->field_last_name['und'][0]['safe_value'];
+    }
+    $newnode->field_legal_name_of_applicant_or['und'][0]['value'] = $rental->title . ' ' . $last_name;
+    // Phone Number
+    if(isset($rental->field_phone_number['und'][0]['safe_value'])) {
+      $newnode->field_phone_number['und'][0]['safe_value'] = $rental->field_phone_number['und'][0]['safe_value'];
+      $newnode->field_phone_number['und'][0]['format']     = $rental->field_phone_number['und'][0]['format'];
+      $newnode->field_phone_number['und'][0]['value']      = $rental->field_phone_number['und'][0]['value'];
+    }
+    // Email Address
+    if(isset($rental->field_email_address['und'][0]['safe_value'])) {
+      $newnode->field_email_address['und'][0]['safe_value'] = $rental->field_email_address['und'][0]['safe_value'];
+      $newnode->field_email_address['und'][0]['format']     = $rental->field_email_address['und'][0]['format'];
+      $newnode->field_email_address['und'][0]['value']      = $rental->field_email_address['und'][0]['value'];
+    }
+    // Expected Attendance
+    if(isset($rental->field_expected_attendance['und'][0]['value'])) {
+      $newnode->field_expected_attendance['und'][0]['value'] = $rental->field_expected_attendance['und'][0]['value'];
+    }
+    // Event Type
+    $newnode->field_event_type['und'][0]['tid'] = $rental->field_event_type['und'][0]['tid'];
+    // Event Venue
+    $newnode->field_name_of_room_s_requesting_['und'][0]['target_id'] = $rental->field_space_requested['und'][0]['target_id'];
+    // Submit & Save Node
+    $newnode = node_submit($newnode); // Prepare node for saving
+    // Create node in the DB
+    node_save($newnode);
+    // Set default moderation status to "Confirmed but not approved" for final
+    // edits from rental staff
+    workbench_moderation_moderate($newnode, 'submitted'); // Need fixing
+
+  }
+}
+
+
+/*
+ * Implements HOOK_views_pre_render
+ *
+ */
+function theatrecustom_mods_views_pre_render(&$view) {
+  if('what_s_on' == $view->name) {
+    $field_name = 'field_presenter_type';
+    $fields = $view->result;
+    foreach($fields as $index => $data) {
+      $node = node_load($fields[$index]->entity);
+      $other = !empty($node->field_presenter_type['und'][0]['tid']) ? $node->field_presenter_type['und'][0]['tid'] : NULL;
+      if($other == '144') { // if presenter type == 'other'
+        unset($view->field[$field_name]);            
+        unset($view->display_handler->handlers['field'][$field_name]);  
+      }
+    }
+  }
+}
+
+
+// display search results only in the current language
+function theatrecustom_mods_query_node_access_alter(QueryAlterableInterface $query) {
+  $search = FALSE;
+  $node = FALSE;
+
+  // Even though we know the node alias is going to be "n", by checking for the
+  // search_index table we make sure we're on the search page. Omitting this step will
+  // break the default admin/content page.
+  foreach ($query->getTables() as $alias => $table) {
+    if ($table['table'] == 'search_index') {
+      $search = $alias;
+    }
+    elseif ($table['table'] == 'node') {
+      $node = $alias;
+    }
+  }
+
+  // Make sure we're on the search page.
+  if ($node && $search) {
+    $db_and = db_and();
+    // I guess you *could* use global $language here instead but this is safer.
+    $language = i18n_language_interface();
+    $lang = $language->language;
+
+    $db_and->condition($node . '.language', $lang, '=');
+    $query->condition($db_and);
+  }
+}
+
+
+// prevent HTML5 browser field validation on webforms
+function theatrecustom_mods_form_alter(&$form,&$form_state,$form_id) {
+  if(strstr($form_id,'webform') !== FALSE) {  
+    // prevent html5 validation, i.e. on input type="email" fields  
+    $form['#attributes']['novalidate'] = '1';  
+  }
+
+  // rental inquiry node form button should say "submit" instead of "save"
+  if ($form_id == 'rental_inquiry_node_form') {
+    $form['actions']['submit']['#value'] = t('Submit');
+  }
+
+  // rental application node form button should say "submit" instead of "save"
+  if ($form_id == 'rental_node_form') {
+    $form['actions']['submit']['#value'] = t('Submit');
+  }
+
+}
